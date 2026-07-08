@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+"""cw - workmux-style git worktree + cmux workspace manager (no tmux)."""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+WS_ROOT = os.path.expanduser("~/ws")
+CMUX_FALLBACK = "/Applications/cmux.app/Contents/Resources/bin/cmux"
+CMUX_TIMEOUT = 10
+
+# --------------------------------------------------------------------------
+# small helpers
+# --------------------------------------------------------------------------
+
+def die(msg, code=1):
+    print(f"cw: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+def warn(msg):
+    print(f"cw: warning: {msg}", file=sys.stderr)
+
+def run(cmd, cwd=None, check=True):
+    """Run a subprocess, capturing output. Returns CompletedProcess."""
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if check and proc.returncode != 0:
+        stderr = proc.stderr.strip() or proc.stdout.strip()
+        die(f"`{' '.join(cmd)}` failed: {stderr}")
+    return proc
+
+def cmux_bin():
+    path = shutil.which("cmux")
+    if path:
+        return path
+    if os.path.exists(CMUX_FALLBACK):
+        return CMUX_FALLBACK
+    return None
+
+def cmux_call(args, json_out=True):
+    """Run a cmux subcommand; return parsed JSON (or None on failure)."""
+    binpath = cmux_bin()
+    if not binpath:
+        warn("cmux not found on PATH; skipping")
+        return None
+    cmd = [binpath] + args
+    if json_out:
+        cmd.append("--json")
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=CMUX_TIMEOUT
+        )
+    except subprocess.TimeoutExpired:
+        warn(f"cmux {' '.join(args)} timed out")
+        return None
+    if proc.returncode != 0:
+        warn(f"cmux {' '.join(args)} failed: {proc.stderr.strip()}")
+        return None
+    if not json_out:
+        return proc.stdout
+    try:
+        return json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        warn(f"cmux {' '.join(args)} returned non-JSON output")
+        return None
+
+def cmux_snapshot():
+    result = cmux_call(["rpc", "extension.sidebar.snapshot", "{}"], json_out=False)
+    if result is None:
+        return []
+    try:
+        return json.loads(result).get("workspaces", [])
+    except (json.JSONDecodeError, ValueError):
+        warn("could not parse cmux sidebar snapshot")
+        return []
+
+def under(path, base):
+    """True if realpath(path) == realpath(base) or is nested under it."""
+    path = os.path.realpath(path)
+    base = os.path.realpath(base)
+    return path == base or path.startswith(base + os.sep)
+
+def git(args, cwd):
+    """Run a git command, capturing output without raising."""
+    return subprocess.run(["git", "-C", cwd] + args, capture_output=True, text=True)
+
+def is_dirty(path):
+    proc = git(["status", "--porcelain"], path)
+    return proc.returncode == 0 and bool(proc.stdout.strip())
+
+def current_branch(path):
+    proc = git(["rev-parse", "--abbrev-ref", "HEAD"], path)
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+def session_ref_under(path, snapshot):
+    """Return 'cmux:<ref>' for a workspace whose cwd is under path, else None."""
+    for ws in snapshot:
+        cur = ws.get("current_directory")
+        if cur and under(cur, path):
+            return ws
+    return None
+
+# --------------------------------------------------------------------------
+# project / worktree resolution
+# --------------------------------------------------------------------------
+
+def project_root(project):
+    return os.path.join(WS_ROOT, project)
+
+def worktrees_dir(project):
+    return f"{project_root(project)}__worktrees"
+
+def worktree_dirname(branch):
+    return branch.replace("/", "-")
+
+def worktree_path(project, branch):
+    return os.path.join(worktrees_dir(project), worktree_dirname(branch))
+
+def check_project(project):
+    root = project_root(project)
+    if not os.path.isdir(root):
+        die(f"project not found: {root}")
+    if git(["rev-parse", "--git-dir"], root).returncode != 0:
+        die(f"not a git repo: {root}")
+    return root
+
+def infer_project_from_cwd():
+    cwd = os.path.realpath(os.getcwd())
+    if not os.path.isdir(WS_ROOT):
+        return None
+    for entry in sorted(os.listdir(WS_ROOT)):
+        base = os.path.realpath(os.path.join(WS_ROOT, entry))
+        if entry.endswith("__worktrees"):
+            project = entry[: -len("__worktrees")]
+        else:
+            project = entry
+        if under(cwd, base):
+            return project
+    return None
+
+def resolve_project_and_branch(args):
+    """Returns (project, branch)."""
+    branch = getattr(args, "branch", None)
+    if args.project:
+        return args.project, branch
+    if branch and "/" in branch:
+        first, rest = branch.split("/", 1)
+        if os.path.isdir(os.path.join(WS_ROOT, first)):
+            return first, rest
+    project = infer_project_from_cwd()
+    if project:
+        return project, branch
+    die("cannot infer project; use --project or <project>/<branch>")
+
+# --------------------------------------------------------------------------
+# subcommands
+# --------------------------------------------------------------------------
+
+def cmd_add(args):
+    project, branch = resolve_project_and_branch(args)
+    root = check_project(project)
+    path = worktree_path(project, branch)
+
+    if os.path.exists(path):
+        die(f"worktree already exists: {path} (use `cw open`)")
+
+    os.makedirs(worktrees_dir(project), exist_ok=True)
+
+    if git(["rev-parse", "--verify", "--quiet", branch], root).returncode == 0:
+        run(["git", "-C", root, "worktree", "add", path, branch])
+    else:
+        run(["git", "-C", root, "worktree", "add", "-b", branch, path])
+
+    print(f"worktree: {path}")
+    _launch_workspace(path, branch, args)
+
+def _launch_workspace(path, branch, args):
+    cmd_text = getattr(args, "cmd", None) or os.environ.get("CW_DEFAULT_CMD")
+    focus = "false" if getattr(args, "no_focus", False) else "true"
+    ws_args = [
+        "workspace", "create",
+        "--cwd", path,
+        "--name", branch,
+        "--focus", focus,
+    ]
+    if cmd_text:
+        ws_args += ["--command", cmd_text]
+    result = cmux_call(ws_args)
+    if result is None:
+        warn("worktree created but cmux workspace was not (cmux call failed)")
+        return
+    ws_id = result.get("workspace_ref") or result.get("workspace_id", "?")
+    print(f"workspace: {ws_id}")
+
+def cmd_open(args):
+    project, branch = resolve_project_and_branch(args)
+    check_project(project)
+    path = worktree_path(project, branch)
+
+    if not os.path.isdir(path):
+        die(f"worktree not found: {path} (use `cw add`)")
+
+    ws = session_ref_under(path, cmux_snapshot())
+    if ws:
+        ref = ws.get("ref") or ws.get("id")
+        result = cmux_call(["workspace", "select", ws.get("id")])
+        if result is None:
+            warn(f"failed to select existing workspace {ref}")
+        else:
+            print(f"selected existing workspace: {ref}")
+        return
+
+    _launch_workspace(path, branch, args)
+
+def cmd_rm(args):
+    project, branch = resolve_project_and_branch(args)
+    root = check_project(project)
+    path = worktree_path(project, branch)
+
+    if not os.path.isdir(path):
+        die(f"worktree not found: {path}")
+
+    if is_dirty(path) and not args.force:
+        die("worktree dirty; use --force")
+
+    _close_sessions_under(path)
+
+    remove_cmd = ["git", "-C", root, "worktree", "remove", path]
+    if args.force:
+        remove_cmd.append("--force")
+    run(remove_cmd)
+    print(f"removed worktree: {path}")
+
+    _delete_branch(root, branch, args.force)
+
+def _close_sessions_under(path):
+    for ws in cmux_snapshot():
+        cur = ws.get("current_directory")
+        if cur and under(cur, path):
+            ref = ws.get("ref") or ws.get("id")
+            result = cmux_call(["workspace", "close", ws.get("id")])
+            if result is None:
+                warn(f"failed to close workspace {ref}")
+            else:
+                print(f"closed workspace: {ref}")
+
+def _delete_branch(root, branch, force):
+    flag = "-D" if force else "-d"
+    proc = git(["branch", flag, branch], root)
+    if proc.returncode != 0:
+        msg = proc.stderr.strip() or proc.stdout.strip()
+        print(msg, file=sys.stderr)
+        print("cw: branch not deleted; `cw rm --force` or merge first with `cw merge`",
+              file=sys.stderr)
+    else:
+        print(f"deleted branch: {branch}")
+
+def cmd_merge(args):
+    project, branch = resolve_project_and_branch(args)
+    root = check_project(project)
+    path = worktree_path(project, branch)
+
+    if not os.path.isdir(path):
+        die(f"worktree not found: {path}")
+
+    if is_dirty(path):
+        die("worktree dirty; commit or stash before merging")
+
+    if is_dirty(root):
+        die(f"main checkout dirty: {root}; commit or stash before merging")
+
+    proc = git(["merge", branch], root)
+    if proc.returncode != 0:
+        print(proc.stdout.strip())
+        print(proc.stderr.strip(), file=sys.stderr)
+        print(f"cw: merge failed; resolve in {root}", file=sys.stderr)
+        sys.exit(1)
+    print(proc.stdout.strip())
+
+    _close_sessions_under(path)
+    run(["git", "-C", root, "worktree", "remove", path])
+    print(f"removed worktree: {path}")
+    _delete_branch(root, branch, force=False)
+
+def cmd_path(args):
+    project, branch = resolve_project_and_branch(args)
+    check_project(project)
+    path = worktree_path(project, branch)
+    if not os.path.isdir(path):
+        die(f"worktree not found: {path}")
+    print(path)
+
+def cmd_ls(args):
+    if args.project:
+        projects = [args.project]
+    else:
+        project = infer_project_from_cwd()
+        if project and os.path.isdir(worktrees_dir(project)):
+            projects = [project]
+        elif not os.path.isdir(WS_ROOT):
+            projects = []
+        else:
+            projects = sorted(
+                entry[: -len("__worktrees")]
+                for entry in os.listdir(WS_ROOT)
+                if entry.endswith("__worktrees")
+                and os.path.isdir(os.path.join(WS_ROOT, entry))
+            )
+
+    if not projects:
+        die("cannot infer project; use --project or <project>/<branch>")
+
+    snapshot = cmux_snapshot()
+
+    rows = []
+    for project in projects:
+        wdir = worktrees_dir(project)
+        if not os.path.isdir(wdir):
+            continue
+        for dirname in sorted(os.listdir(wdir)):
+            path = os.path.join(wdir, dirname)
+            if not os.path.isdir(path):
+                continue
+
+            branch = current_branch(path)
+            dirty = "*" if is_dirty(path) else ""
+            ws = session_ref_under(path, snapshot)
+            session = f"cmux:{ws.get('ref') or ws.get('id')}" if ws else "-"
+
+            rows.append((f"{project}/{dirname}", branch, dirty, session, path))
+
+    if not rows:
+        return
+
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    for name, branch, dirty, session, path in rows:
+        print(
+            f"{name:<{widths[0]}}  {branch:<{widths[1]}}  {dirty:<{widths[2]}}  "
+            f"{session:<{widths[3]}}  {path}"
+        )
+
+# --------------------------------------------------------------------------
+# argument parsing
+# --------------------------------------------------------------------------
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        prog="cw", description="manage git worktrees + cmux workspaces"
+    )
+    sub = parser.add_subparsers(dest="subcommand")
+
+    def add_common(p, branch_help="branch (or <project>/<branch>)"):
+        p.add_argument("branch", help=branch_help)
+        p.add_argument("--project", help="project name under ~/ws")
+
+    p_add = sub.add_parser("add", help="create a worktree + cmux workspace")
+    add_common(p_add)
+    p_add.add_argument("--cmd", help="command to run in the new workspace")
+    p_add.add_argument("--no-focus", action="store_true", help="don't focus the new workspace")
+    p_add.set_defaults(func=cmd_add)
+
+    p_rm = sub.add_parser("rm", aliases=["remove"], help="remove a worktree + branch")
+    add_common(p_rm)
+    p_rm.add_argument("--force", action="store_true", help="force removal of dirty worktree/branch")
+    p_rm.set_defaults(func=cmd_rm)
+
+    p_merge = sub.add_parser("merge", help="merge branch into main checkout, then clean up")
+    add_common(p_merge)
+    p_merge.set_defaults(func=cmd_merge)
+
+    p_open = sub.add_parser("open", help="focus or create a cmux workspace for a worktree")
+    add_common(p_open)
+    p_open.add_argument("--cmd", help="command to run if a new workspace is created")
+    p_open.add_argument("--no-focus", action="store_true", help="don't focus the workspace")
+    p_open.set_defaults(func=cmd_open)
+
+    p_ls = sub.add_parser("ls", aliases=["list"], help="list worktrees")
+    p_ls.add_argument("--project", help="project name under ~/ws")
+    p_ls.set_defaults(func=cmd_ls)
+
+    p_path = sub.add_parser("path", help="print a worktree's path")
+    add_common(p_path)
+    p_path.set_defaults(func=cmd_path)
+
+    return parser
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    if not args.subcommand:
+        args = parser.parse_args(["ls"])
+
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        die("interrupted", code=1)
+    except SystemExit:
+        raise
+    except Exception as exc:  # unexpected
+        die(f"unexpected error: {exc}", code=2)
+
+if __name__ == "__main__":
+    main()

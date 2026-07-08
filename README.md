@@ -2,7 +2,10 @@
 
 Home project for my cmux customization work.
 
-## What's set up (lives outside this repo)
+## What's set up
+
+These files are versioned in this repo and symlinked/copied into place by
+`./install.sh`:
 
 - **Sidebar auto-grouping** — `~/.local/bin/cmux-autogroup`, run by the launchd
   agent `com.cmux.autogroup` (`~/Library/LaunchAgents/`). Groups cmux
@@ -16,6 +19,34 @@ Home project for my cmux customization work.
 - **`projects` custom sidebar** — `~/.config/cmux/sidebars/projects.swift`.
   Alternative left-sidebar view grouping sessions by project (not selected;
   native groups + autogroup daemon is the active setup).
+
+## Layout
+
+```
+cmux-config/
+  install.sh                                 # idempotent installer
+  bin/cw                                     # -> ~/.local/bin/cw
+  bin/cmux-autogroup                         # -> ~/.local/bin/cmux-autogroup
+  launchd/com.cmux.autogroup.plist  # -> ~/Library/LaunchAgents/
+  sidebars/projects.swift                    # -> ~/.config/cmux/sidebars/projects.swift
+```
+
+## Install
+
+```
+./install.sh
+```
+
+Idempotent — safe to re-run; backs up anything it replaces with timestamped
+`.bak.<YYYYmmddHHMMSS>` files. The launchd plist is copied (not symlinked),
+since launchd mistrusts symlinked agent plists; everything else is symlinked.
+
+**Requirement:** the autogroup daemon runs outside cmux, so cmux's control
+socket must allow it: set `automation.socketControlMode` to `"automation"` in
+`~/.config/cmux/cmux.json` and restart cmux — the socket server reads the mode
+only at app startup (the default `cmuxOnly` rejects any process not spawned
+inside cmux with `Broken pipe`). `cmux capabilities | grep access_mode` shows
+the live mode; the installer warns when it's wrong.
 
 ## Worktree layout
 

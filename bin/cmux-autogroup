@@ -1,0 +1,561 @@
+#!/usr/bin/env python3
+"""cmux-autogroup: auto-organize cmux workspaces into native sidebar
+workspace groups, one group per project under ~/ws.
+
+Modes:
+  cmux-autogroup sweep [--dry-run]   one reconciliation pass
+  cmux-autogroup watch               sweep, then follow cmux events and
+                                      re-sweep on change (debounced) and
+                                      at least every 60s regardless
+
+Python 3 stdlib only.
+"""
+
+import argparse
+import json
+import os
+import queue
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+WS_ROOT = Path("$HOME/ws")
+STATE_DIR = Path.home() / ".local" / "state" / "cmux-autogroup"
+STATE_FILE = STATE_DIR / "state.json"
+LOG_FILE = STATE_DIR / "cmux-autogroup.log"
+CMUX_FALLBACK = "/Applications/cmux.app/Contents/Resources/bin/cmux"
+
+MIN_SESSIONS = 2  # minimum candidates for a project before we create a group
+CMUX_TIMEOUT = 10  # seconds, for every cmux subprocess call
+DEBOUNCE_SECONDS = 2.0
+FORCE_SWEEP_INTERVAL = 60.0
+MAX_LOG_BYTES = 1024 * 1024
+
+# Set at startup based on --dry-run; when true, log() also echoes to stdout.
+_ECHO_STDOUT = False
+
+
+def find_cmux_bin():
+    found = shutil.which("cmux")
+    return found if found else CMUX_FALLBACK
+
+
+CMUX_BIN = find_cmux_bin()
+
+
+# --------------------------------------------------------------------------
+# Logging
+# --------------------------------------------------------------------------
+
+def _rotate_log_if_needed():
+    try:
+        if LOG_FILE.exists() and LOG_FILE.stat().st_size > MAX_LOG_BYTES:
+            rotated = LOG_FILE.parent / (LOG_FILE.name + ".1")
+            os.replace(LOG_FILE, rotated)
+    except OSError:
+        pass
+
+
+def log(msg):
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    line = f"[{ts}] {msg}"
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _rotate_log_if_needed()
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    if _ECHO_STDOUT:
+        print(line)
+
+
+# --------------------------------------------------------------------------
+# cmux subprocess helpers
+# --------------------------------------------------------------------------
+
+def run_cmux(args, timeout=CMUX_TIMEOUT):
+    """Run a cmux command, returning stdout text on success or None on failure."""
+    cmd = [CMUX_BIN, "--id-format", "both"] + args
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log(f"ERROR: cmux command timed out after {timeout}s: {' '.join(cmd)}")
+        return None
+    except OSError as e:
+        log(f"ERROR: failed to launch cmux command {' '.join(cmd)}: {e}")
+        return None
+    if proc.returncode != 0:
+        log(
+            f"ERROR: cmux command exited {proc.returncode}: {' '.join(cmd)} "
+            f"stderr={proc.stderr.strip()!r}"
+        )
+        return None
+    return proc.stdout
+
+
+def run_cmux_json(args, timeout=CMUX_TIMEOUT):
+    """Run a cmux command and parse its stdout as JSON. None on any failure."""
+    out = run_cmux(args, timeout=timeout)
+    if out is None:
+        return None
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError as e:
+        log(f"ERROR: failed to parse JSON from cmux {' '.join(args)}: {e}")
+        return None
+
+
+def pick(d, *keys):
+    """Return the first present, non-None value among keys in dict d."""
+    if not isinstance(d, dict):
+        return None
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return None
+
+
+# --------------------------------------------------------------------------
+# State file
+# --------------------------------------------------------------------------
+
+def default_state():
+    return {"assignments": {}, "managed_groups": {}}
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return default_state()
+    except (OSError, json.JSONDecodeError) as e:
+        log(f"ERROR: failed to load state file {STATE_FILE}, starting fresh: {e}")
+        return default_state()
+    data.setdefault("assignments", {})
+    data.setdefault("managed_groups", {})
+    return data
+
+
+def save_state(state, dry_run=False):
+    if dry_run:
+        log("[dry-run] would write state file (skipped)")
+        return
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(dir=str(STATE_DIR), prefix=".state.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(state, f, indent=2, sort_keys=True)
+                f.write("\n")
+            os.replace(tmp_path, STATE_FILE)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except OSError as e:
+        log(f"ERROR: failed to save state file {STATE_FILE}: {e}")
+
+
+# --------------------------------------------------------------------------
+# Project derivation
+# --------------------------------------------------------------------------
+
+def compute_project(dir_str):
+    """Return the project name for a workspace directory, or None if the
+    directory is out of scope (not under WS_ROOT)."""
+    if not dir_str:
+        return None
+    try:
+        real = Path(dir_str).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    try:
+        rel = real.relative_to(WS_ROOT)
+    except ValueError:
+        return None
+    if not rel.parts:
+        return None
+    project = rel.parts[0]
+    suffix = "__worktrees"
+    if project.endswith(suffix):
+        project = project[: -len(suffix)]
+    return project
+
+
+def project_root_for(project, fallback_dir):
+    root = WS_ROOT / project
+    if root.is_dir():
+        return str(root)
+    return fallback_dir
+
+
+# --------------------------------------------------------------------------
+# cmux state fetch + map building
+# --------------------------------------------------------------------------
+
+def fetch_cmux_state():
+    snap = run_cmux_json(["rpc", "extension.sidebar.snapshot", "{}"])
+    if snap is None:
+        return None
+    groups_resp = run_cmux_json(["workspace", "group", "list", "--json"])
+    if groups_resp is None:
+        return None
+    return snap, groups_resp
+
+
+def build_maps(snap, groups_resp):
+    workspaces_by_id = {}
+    for w in snap.get("workspaces", []):
+        wid = pick(w, "id", "workspace_id")
+        if wid:
+            workspaces_by_id[wid] = w
+
+    groups_by_id = {}
+    anchor_ids = set()
+    id_to_group = {}
+    group_name_to_id = {}
+    for g in groups_resp.get("groups", []):
+        gid = pick(g, "id", "ref", "group_id", "groupId")
+        if not gid:
+            continue
+        groups_by_id[gid] = g
+        name = pick(g, "name", "group_name", "groupName")
+        anchor = pick(
+            g,
+            "anchor_workspace_id",
+            "anchor_workspace_ref",
+            "anchorWorkspaceId",
+            "anchorWorkspaceRef",
+        )
+        if anchor:
+            anchor_ids.add(anchor)
+        members = (
+            pick(
+                g,
+                "member_workspace_ids",
+                "workspace_ids",
+                "members",
+                "member_workspace_refs",
+                "memberWorkspaceRefs",
+                "workspaceIds",
+            )
+            or []
+        )
+        for m in members:
+            id_to_group[m] = gid
+        if name and name not in group_name_to_id:
+            group_name_to_id[name] = gid
+
+    return workspaces_by_id, groups_by_id, anchor_ids, id_to_group, group_name_to_id
+
+
+# --------------------------------------------------------------------------
+# cmux mutating actions
+# --------------------------------------------------------------------------
+
+def add_to_group(gid, wid, dry_run):
+    if dry_run:
+        log(f"[dry-run] would run: workspace-group add --group {gid} --workspace {wid}")
+        return True
+    resp = run_cmux_json(["workspace-group", "add", "--group", gid, "--workspace", wid, "--json"])
+    if resp is None:
+        log(f"ERROR: failed to add workspace {wid} to group {gid}")
+        return False
+    log(f"added workspace {wid} to group {gid}")
+    return True
+
+
+def remove_from_group(wid, dry_run):
+    if dry_run:
+        log(f"[dry-run] would run: workspace-group remove --workspace {wid}")
+        return True
+    resp = run_cmux_json(["workspace-group", "remove", "--workspace", wid, "--json"])
+    if resp is None:
+        log(f"ERROR: failed to remove workspace {wid} from its group")
+        return False
+    log(f"removed workspace {wid} from its group")
+    return True
+
+
+def create_group(project, root, ids, dry_run):
+    if dry_run:
+        log(
+            f"[dry-run] would run: workspace-group create --name {project} "
+            f"--cwd {root} --from {','.join(ids)}"
+        )
+        for wid in ids:
+            log(f"[dry-run] would assign workspace {wid} to new group for project {project}")
+        return None
+    resp = run_cmux_json(
+        [
+            "workspace-group",
+            "create",
+            "--name",
+            project,
+            "--cwd",
+            root,
+            "--from",
+            ",".join(ids),
+            "--json",
+        ]
+    )
+    if resp is None:
+        log(f"ERROR: failed to create group for project {project}")
+        return None
+    gid = pick(resp.get("group", {}), "id", "ref", "group_id", "groupId")
+    if not gid:
+        log(f"ERROR: create group response missing id/ref for project {project}: {resp}")
+        return None
+    log(f"created group {gid} for project {project} (cwd={root}) with members {ids}")
+    return gid
+
+
+def set_icon(gid, dry_run):
+    if dry_run:
+        log(f"[dry-run] would run: workspace-group set-icon {gid} --symbol folder.fill")
+        return
+    resp = run_cmux_json(["workspace-group", "set-icon", gid, "--symbol", "folder.fill", "--json"])
+    if resp is None:
+        log(f"ERROR: failed to set icon for group {gid}")
+
+
+def record_assignment(state, wid, gid, project, ws):
+    state["assignments"][wid] = {
+        "group_id": gid,
+        "group_name": project,
+        "dir": pick(ws, "current_directory"),
+        "opt_out": False,
+    }
+    log(f"recorded assignment: workspace {wid} -> group {gid} (project {project})")
+
+
+# --------------------------------------------------------------------------
+# Sweep (core reconciliation)
+# --------------------------------------------------------------------------
+
+def sweep(dry_run=False):
+    state = load_state()
+
+    fetched = fetch_cmux_state()
+    if fetched is None:
+        log("ERROR: sweep aborted, could not fetch cmux state")
+        return
+    snap, groups_resp = fetched
+    workspaces_by_id, groups_by_id, anchor_ids, id_to_group, group_name_to_id = build_maps(
+        snap, groups_resp
+    )
+
+    # Prune managed_groups entries whose group no longer exists, so a
+    # deleted/ungrouped project group can be recreated once the threshold
+    # is met again.
+    for gid in [g for g in state["managed_groups"] if g not in groups_by_id]:
+        proj = state["managed_groups"].pop(gid)
+        log(f"pruned stale managed_groups record {gid} ({proj}); group no longer exists")
+
+    # Prune assignments for workspace ids that no longer exist.
+    for wid in [w for w in state["assignments"] if w not in workspaces_by_id]:
+        log(f"pruned assignment for closed workspace {wid}")
+        del state["assignments"][wid]
+
+    candidates = {}  # project -> [workspace_id, ...]
+
+    for wid, w in workspaces_by_id.items():
+        if wid in anchor_ids:
+            continue
+        dir_ = pick(w, "current_directory")
+        desired_project = compute_project(dir_)
+        if desired_project is None:
+            continue  # out of scope
+
+        current_group_id = id_to_group.get(wid)
+        assignment = state["assignments"].get(wid)
+
+        if assignment is not None:
+            recorded_gid = assignment.get("group_id")
+            if current_group_id != recorded_gid:
+                if current_group_id is None:
+                    if not assignment.get("opt_out"):
+                        assignment["opt_out"] = True
+                        log(
+                            f"workspace {wid} was pulled out of group {recorded_gid} "
+                            "by the user; marking opt_out"
+                        )
+                    continue
+                else:
+                    log(
+                        f"workspace {wid} was moved by the user from group "
+                        f"{recorded_gid} to {current_group_id}; dropping our record"
+                    )
+                    del state["assignments"][wid]
+                    continue
+
+            if assignment.get("opt_out"):
+                continue
+
+            recorded_project = assignment.get("group_name")
+            if desired_project != recorded_project:
+                log(
+                    f"workspace {wid} directory now maps to project "
+                    f"'{desired_project}' (was '{recorded_project}'); re-filing"
+                )
+                remove_from_group(wid, dry_run)
+                del state["assignments"][wid]
+                candidates.setdefault(desired_project, []).append(wid)
+            # else: correctly filed already, nothing to do.
+        else:
+            if current_group_id is not None:
+                # Grouped, but not by us and we have no record: user did it manually.
+                continue
+            candidates.setdefault(desired_project, []).append(wid)
+
+    for project, ids in candidates.items():
+        managed_gid = next(
+            (gid for gid, proj in state["managed_groups"].items() if proj == project and gid in groups_by_id),
+            None,
+        )
+        if managed_gid:
+            for wid in ids:
+                if add_to_group(managed_gid, wid, dry_run):
+                    record_assignment(state, wid, managed_gid, project, workspaces_by_id[wid])
+            continue
+
+        unmanaged_gid = group_name_to_id.get(project)
+        if unmanaged_gid and unmanaged_gid not in state["managed_groups"]:
+            for wid in ids:
+                if add_to_group(unmanaged_gid, wid, dry_run):
+                    record_assignment(state, wid, unmanaged_gid, project, workspaces_by_id[wid])
+            continue
+
+        if len(ids) >= MIN_SESSIONS:
+            root = project_root_for(project, workspaces_by_id[ids[0]].get("current_directory"))
+            new_gid = create_group(project, root, ids, dry_run)
+            if new_gid:
+                set_icon(new_gid, dry_run)
+                state["managed_groups"][new_gid] = project
+                for wid in ids:
+                    record_assignment(state, wid, new_gid, project, workspaces_by_id[wid])
+        else:
+            log(
+                f"project '{project}': workspace(s) {ids} candidate (below threshold): "
+                f"have {len(ids)}, need {MIN_SESSIONS}"
+            )
+
+    save_state(state, dry_run=dry_run)
+
+
+# --------------------------------------------------------------------------
+# Watch mode
+# --------------------------------------------------------------------------
+
+def _reader_thread(pipe, q):
+    try:
+        for line in iter(pipe.readline, ""):
+            q.put(("line", line))
+    except Exception:
+        pass
+    q.put(("eof", None))
+
+
+def watch():
+    log("watch: starting")
+    try:
+        sweep(dry_run=False)
+    except Exception as e:
+        log(f"ERROR: initial sweep raised exception: {e}")
+
+    backoff = 5
+    while True:
+        try:
+            proc = subprocess.Popen(
+                [CMUX_BIN, "events", "--category", "workspace", "--reconnect"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except OSError as e:
+            log(f"ERROR: failed to launch cmux events subprocess: {e}")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+            continue
+
+        log(f"watch: events subprocess started (pid {proc.pid})")
+        backoff = 5
+
+        q = queue.Queue()
+        rt = threading.Thread(target=_reader_thread, args=(proc.stdout, q), daemon=True)
+        rt.start()
+
+        pending_sweep = False
+        last_sweep = time.time()
+        exited = False
+
+        while not exited:
+            if pending_sweep:
+                timeout = DEBOUNCE_SECONDS
+            else:
+                timeout = max(0.1, FORCE_SWEEP_INTERVAL - (time.time() - last_sweep))
+            try:
+                kind, _payload = q.get(timeout=timeout)
+            except queue.Empty:
+                if pending_sweep or (time.time() - last_sweep >= FORCE_SWEEP_INTERVAL):
+                    try:
+                        sweep(dry_run=False)
+                    except Exception as e:
+                        log(f"ERROR: sweep raised exception: {e}")
+                    pending_sweep = False
+                    last_sweep = time.time()
+                continue
+
+            if kind == "eof":
+                exited = True
+                break
+            pending_sweep = True
+
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+
+        log(f"watch: events subprocess exited; retrying in {backoff}s")
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 60)
+
+
+# --------------------------------------------------------------------------
+# Entry point
+# --------------------------------------------------------------------------
+
+def main():
+    global _ECHO_STDOUT
+
+    parser = argparse.ArgumentParser(prog="cmux-autogroup")
+    sub = parser.add_subparsers(dest="mode", required=True)
+
+    sweep_p = sub.add_parser("sweep", help="run one reconciliation pass")
+    sweep_p.add_argument("--dry-run", action="store_true", help="don't execute group mutations")
+
+    sub.add_parser("watch", help="sweep, then follow cmux events and re-sweep on change")
+
+    args = parser.parse_args()
+
+    if args.mode == "sweep":
+        _ECHO_STDOUT = bool(args.dry_run)
+        sweep(dry_run=args.dry_run)
+    elif args.mode == "watch":
+        watch()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
