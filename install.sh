@@ -36,6 +36,7 @@ link_file() {
 link_file bin/cw "$HOME/.local/bin/cw"
 link_file bin/cmux-autogroup "$HOME/.local/bin/cmux-autogroup"
 link_file sidebars/projects.swift "$HOME/.config/cmux/sidebars/projects.swift"
+link_file skills/cmux-issue "$HOME/.claude/skills/cmux-issue"
 
 # Plist is copied, not symlinked -- launchd mistrusts symlinked agent plists.
 agent_loaded() {
