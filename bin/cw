@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 
-WS_ROOT = os.path.expanduser("~/ws")
+WS_ROOT = os.path.expanduser(os.environ.get("CMUX_WS_ROOT", "~/ws"))
 CMUX_FALLBACK = "/Applications/cmux.app/Contents/Resources/bin/cmux"
 CMUX_TIMEOUT = 10
 

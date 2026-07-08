@@ -22,6 +22,14 @@ These files are versioned in this repo and symlinked/copied into place by
   prompt, and runs `cw add <branch> --cmd 'claude --permission-mode=…'` so an
   agent implements it end to end through a draft PR. Builds on `cw`.
 
+## Configuration
+
+`CMUX_WS_ROOT` overrides the default `~/ws` workspace root for both `cw` and
+the autogroup daemon. `cw` reads it live from your shell environment. The
+daemon can't see shell env vars (launchd), so `install.sh` bakes the current
+`CMUX_WS_ROOT` (or `~/ws`) into the plist at install time — export it before
+running `./install.sh`, and re-run the installer to change it.
+
 ## Layout
 
 ```

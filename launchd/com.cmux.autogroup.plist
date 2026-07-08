@@ -20,6 +20,8 @@
 	<dict>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Applications/cmux.app/Contents/Resources/bin</string>
+		<key>CMUX_WS_ROOT</key>
+		<string>__WS_ROOT__</string>
 	</dict>
 	<key>StandardOutPath</key>
 	<string>__HOME__/.local/state/cmux-autogroup/launchd.log</string>

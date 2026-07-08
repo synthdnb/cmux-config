@@ -44,7 +44,9 @@ agent_loaded() {
 }
 
 render_plist() {
-  sed "s|__HOME__|$HOME|g" "$PLIST_SRC"
+  local ws_root="${CMUX_WS_ROOT:-$HOME/ws}"
+  ws_root="${ws_root/#\~/$HOME}"
+  sed -e "s|__HOME__|$HOME|g" -e "s|__WS_ROOT__|$ws_root|g" "$PLIST_SRC"
 }
 
 plist_state="ok (current)"
@@ -72,6 +74,7 @@ else
 fi
 [ "$plist_state" = "ok (current)" ] && plist_state="ok (current): $PLIST_DEST"
 SUMMARY+=("$plist_state")
+SUMMARY+=("ws root: ${CMUX_WS_ROOT:-$HOME/ws}")
 
 mkdir -p "$HOME/.local/state/cmux-autogroup"
 
