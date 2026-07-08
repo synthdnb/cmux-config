@@ -23,7 +23,7 @@ import threading
 import time
 from pathlib import Path
 
-WS_ROOT = Path("$HOME/ws")
+WS_ROOT = Path.home() / "ws"
 STATE_DIR = Path.home() / ".local" / "state" / "cmux-autogroup"
 STATE_FILE = STATE_DIR / "state.json"
 LOG_FILE = STATE_DIR / "cmux-autogroup.log"

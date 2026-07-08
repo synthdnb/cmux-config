@@ -7,7 +7,7 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/usr/bin/python3</string>
-		<string>$HOME/.local/bin/cmux-autogroup</string>
+		<string>__HOME__/.local/bin/cmux-autogroup</string>
 		<string>watch</string>
 	</array>
 	<key>RunAtLoad</key>
@@ -22,8 +22,8 @@
 		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Applications/cmux.app/Contents/Resources/bin</string>
 	</dict>
 	<key>StandardOutPath</key>
-	<string>$HOME/.local/state/cmux-autogroup/launchd.log</string>
+	<string>__HOME__/.local/state/cmux-autogroup/launchd.log</string>
 	<key>StandardErrorPath</key>
-	<string>$HOME/.local/state/cmux-autogroup/launchd.log</string>
+	<string>__HOME__/.local/state/cmux-autogroup/launchd.log</string>
 </dict>
 </plist>

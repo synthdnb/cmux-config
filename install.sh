@@ -37,20 +37,25 @@ link_file bin/cw "$HOME/.local/bin/cw"
 link_file bin/cmux-autogroup "$HOME/.local/bin/cmux-autogroup"
 link_file skills/cmux-issue "$HOME/.claude/skills/cmux-issue"
 
-# Plist is copied, not symlinked -- launchd mistrusts symlinked agent plists.
+# Plist is rendered from a template (with the local $HOME substituted in) and
+# copied, not symlinked -- launchd mistrusts symlinked agent plists.
 agent_loaded() {
   launchctl print "gui/$UID/${AGENT_LABEL}" >/dev/null 2>&1
 }
 
+render_plist() {
+  sed "s|__HOME__|$HOME|g" "$PLIST_SRC"
+}
+
 plist_state="ok (current)"
 if [ -e "$PLIST_DEST" ]; then
-  if cmp -s "$PLIST_SRC" "$PLIST_DEST"; then
+  if diff -q <(render_plist) "$PLIST_DEST" >/dev/null 2>&1; then
     echo "ok (current): $PLIST_DEST"
   else
     bak="${PLIST_DEST}.bak.$(date +%Y%m%d%H%M%S)"
     mv "$PLIST_DEST" "$bak"
     echo "backed up $PLIST_DEST -> $bak"
-    cp -p "$PLIST_SRC" "$PLIST_DEST"
+    render_plist > "$PLIST_DEST"
     echo "copied: $PLIST_DEST"
     plist_state="copied (updated): $PLIST_DEST"
     if agent_loaded; then
@@ -61,12 +66,14 @@ if [ -e "$PLIST_DEST" ]; then
   fi
 else
   mkdir -p "$(dirname "$PLIST_DEST")"
-  cp -p "$PLIST_SRC" "$PLIST_DEST"
+  render_plist > "$PLIST_DEST"
   echo "copied: $PLIST_DEST"
   plist_state="copied: $PLIST_DEST"
 fi
 [ "$plist_state" = "ok (current)" ] && plist_state="ok (current): $PLIST_DEST"
 SUMMARY+=("$plist_state")
+
+mkdir -p "$HOME/.local/state/cmux-autogroup"
 
 if ! agent_loaded; then
   if launchctl bootstrap "gui/$UID" "$PLIST_DEST" 2>/dev/null; then

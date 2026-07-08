@@ -1,6 +1,6 @@
 ---
 name: cmux-issue
-description: "Launch a Linear issue as an autonomous cmux session: create a git worktree via `cw`, start Claude with bypassPermissions, and drive it until a draft PR is open. Use when the user says to launch/open/spin up a cmux session for a Linear issue (e.g. VES-1234), 'implement this issue in cmux', or dispatch one or more issues to worktrees."
+description: "Launch a Linear issue as an autonomous cmux session: create a git worktree via `cw`, start Claude with bypassPermissions, and drive it until a draft PR is open. Use when the user says to launch/open/spin up a cmux session for a Linear issue (e.g. ABC-123), 'implement this issue in cmux', or dispatch one or more issues to worktrees."
 allowed-tools: Bash, Write, mcp__claude_ai_Linear__get_issue
 ---
 
@@ -28,9 +28,9 @@ the branch name and the spec to embed. That is reading the ticket, not the code.
 
 ### 1. Fetch the ticket
 
-Run `mcp__claude_ai_Linear__get_issue` for the identifier (e.g. `VES-2345`).
+Run `mcp__claude_ai_Linear__get_issue` for the identifier (e.g. `ABC-123`).
 Capture from the result:
-- `gitBranchName` — this is the worktree branch (e.g. `ves-2345`). Use it
+- `gitBranchName` — this is the worktree branch (e.g. `abc-123`). Use it
   verbatim; `cw` maps `/` → `-` for the directory name.
 - `title`, `url`, `description`, and any `parentId` / related-issue links.
 

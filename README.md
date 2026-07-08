@@ -28,7 +28,7 @@ cmux-config/
   install.sh                                 # idempotent installer
   bin/cw                                     # -> ~/.local/bin/cw
   bin/cmux-autogroup                         # -> ~/.local/bin/cmux-autogroup
-  launchd/com.cmux.autogroup.plist  # -> ~/Library/LaunchAgents/
+  launchd/com.cmux.autogroup.plist           # -> ~/Library/LaunchAgents/
   skills/cmux-issue/                          # -> ~/.claude/skills/cmux-issue
 ```
 
@@ -39,7 +39,8 @@ cmux-config/
 ```
 
 Idempotent — safe to re-run; backs up anything it replaces with timestamped
-`.bak.<YYYYmmddHHMMSS>` files. The launchd plist is copied (not symlinked),
+`.bak.<YYYYmmddHHMMSS>` files. The launchd plist is rendered from a template
+with the local `$HOME` substituted in and copied into place (not symlinked),
 since launchd mistrusts symlinked agent plists; everything else is symlinked.
 
 **Requirement:** the autogroup daemon runs outside cmux, so cmux's control
