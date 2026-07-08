@@ -35,7 +35,6 @@ link_file() {
 
 link_file bin/cw "$HOME/.local/bin/cw"
 link_file bin/cmux-autogroup "$HOME/.local/bin/cmux-autogroup"
-link_file sidebars/projects.swift "$HOME/.config/cmux/sidebars/projects.swift"
 link_file skills/cmux-issue "$HOME/.claude/skills/cmux-issue"
 
 # Plist is copied, not symlinked -- launchd mistrusts symlinked agent plists.
@@ -81,7 +80,7 @@ else
   SUMMARY+=("ok (loaded): ${AGENT_LABEL}")
 fi
 
-# Best-effort sidebar validation.
+# Best-effort cmux socket check.
 CMUX_BIN=""
 if command -v cmux >/dev/null 2>&1; then
   CMUX_BIN="cmux"
@@ -100,16 +99,9 @@ if [ -n "$CMUX_BIN" ]; then
     echo "         and restart cmux (the mode is read only at app startup)."
     SUMMARY+=("warning: socket access_mode '$mode' blocks the daemon")
   fi
-  if "$CMUX_BIN" sidebar validate projects; then
-    echo "ok (validated): sidebar projects"
-    SUMMARY+=("ok (validated): sidebar projects")
-  else
-    echo "warning: sidebar validate failed"
-    SUMMARY+=("warning: sidebar validate failed")
-  fi
 else
-  echo "note: cmux not on PATH, skipping sidebar validate"
-  SUMMARY+=("skipped: sidebar validate (cmux not found)")
+  echo "note: cmux not on PATH, skipping socket access_mode check"
+  SUMMARY+=("skipped: socket access_mode check (cmux not found)")
 fi
 
 echo

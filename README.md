@@ -16,9 +16,6 @@ These files are versioned in this repo and symlinked/copied into place by
   cmux sessions: `cw add|open|rm|merge|ls|path <branch>`, project inferred
   from cwd or `<project>/<branch>`. `CW_DEFAULT_CMD` / `--cmd` starts an agent
   in new sessions.
-- **`projects` custom sidebar** — `~/.config/cmux/sidebars/projects.swift`.
-  Alternative left-sidebar view grouping sessions by project (not selected;
-  native groups + autogroup daemon is the active setup).
 - **`cmux-issue` Claude skill** — `~/.claude/skills/cmux-issue`. Launches a
   Linear issue as an autonomous cmux session: fetches the ticket, writes a
   prompt, and runs `cw add <branch> --cmd 'claude --permission-mode=…'` so an
@@ -32,7 +29,6 @@ cmux-config/
   bin/cw                                     # -> ~/.local/bin/cw
   bin/cmux-autogroup                         # -> ~/.local/bin/cmux-autogroup
   launchd/com.cmux.autogroup.plist  # -> ~/Library/LaunchAgents/
-  sidebars/projects.swift                    # -> ~/.config/cmux/sidebars/projects.swift
   skills/cmux-issue/                          # -> ~/.claude/skills/cmux-issue
 ```
 
