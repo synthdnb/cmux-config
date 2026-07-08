@@ -29,7 +29,7 @@ STATE_FILE = STATE_DIR / "state.json"
 LOG_FILE = STATE_DIR / "cmux-autogroup.log"
 CMUX_FALLBACK = "/Applications/cmux.app/Contents/Resources/bin/cmux"
 
-MIN_SESSIONS = 2  # minimum candidates for a project before we create a group
+MIN_SESSIONS = 1  # minimum candidates for a project before we create a group
 CMUX_TIMEOUT = 10  # seconds, for every cmux subprocess call
 DEBOUNCE_SECONDS = 2.0
 FORCE_SWEEP_INTERVAL = 60.0
@@ -372,10 +372,31 @@ def sweep(dry_run=False):
             continue
         dir_ = pick(w, "current_directory")
         desired_project = compute_project(dir_)
+        current_group_id = id_to_group.get(wid)
+
+        # Enforce membership correctness for groups WE manage: a member whose
+        # directory no longer maps to the group's project (including a cwd that
+        # moved out of scope entirely) is evicted, even when we have no
+        # assignment record for it. This catches workspaces filed under the
+        # wrong project -- e.g. cwd misdetected at creation -- whose assignment
+        # record was since lost. Unmanaged / user-created groups are left alone.
+        managed_project = (
+            state["managed_groups"].get(current_group_id) if current_group_id else None
+        )
+        if managed_project is not None and desired_project != managed_project:
+            log(
+                f"workspace {wid} is in managed group '{managed_project}' but its "
+                f"directory maps to '{desired_project}'; removing from group"
+            )
+            remove_from_group(wid, dry_run)
+            state["assignments"].pop(wid, None)
+            if desired_project is not None:
+                candidates.setdefault(desired_project, []).append(wid)
+            continue
+
         if desired_project is None:
             continue  # out of scope
 
-        current_group_id = id_to_group.get(wid)
         assignment = state["assignments"].get(wid)
 
         if assignment is not None:
