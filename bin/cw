@@ -140,9 +140,34 @@ def infer_project_from_cwd():
             return project
     return None
 
+def infer_worktree_from_cwd():
+    """Returns (project, branch, worktree_dir) for the worktree containing cwd, else None."""
+    cwd = os.path.realpath(os.getcwd())
+    root = os.path.realpath(WS_ROOT)
+    if not under(cwd, root):
+        return None
+    parts = os.path.relpath(cwd, root).split(os.sep)
+    if len(parts) < 2 or not parts[0].endswith("__worktrees"):
+        return None
+    project = parts[0][: -len("__worktrees")]
+    wt_dir = os.path.join(root, parts[0], parts[1])
+    branch = current_branch(wt_dir)
+    if not branch or branch == "HEAD":
+        branch = parts[1]
+    return project, branch, wt_dir
+
 def resolve_project_and_branch(args):
-    """Returns (project, branch)."""
+    """Returns (project, branch). May set args.worktree_dir when inferred from cwd."""
     branch = getattr(args, "branch", None)
+    if not branch:
+        inferred = infer_worktree_from_cwd()
+        if inferred:
+            project, branch, wt_dir = inferred
+            # The dir name can diverge from the branch (renamed branch); keep
+            # the real path so callers don't recompute it from the branch.
+            args.worktree_dir = wt_dir
+            return project, branch
+        die("no branch given and not inside a worktree; run from a worktree or pass <branch>")
     if args.project:
         return args.project, branch
     if branch and "/" in branch:
@@ -197,7 +222,7 @@ def _launch_workspace(path, branch, args):
 def cmd_open(args):
     project, branch = resolve_project_and_branch(args)
     check_project(project)
-    path = worktree_path(project, branch)
+    path = getattr(args, "worktree_dir", None) or worktree_path(project, branch)
 
     if not os.path.isdir(path):
         die(f"worktree not found: {path} (use `cw add`)")
@@ -217,7 +242,7 @@ def cmd_open(args):
 def cmd_rm(args):
     project, branch = resolve_project_and_branch(args)
     root = check_project(project)
-    path = worktree_path(project, branch)
+    path = getattr(args, "worktree_dir", None) or worktree_path(project, branch)
 
     if not os.path.isdir(path):
         die(f"worktree not found: {path}")
@@ -260,7 +285,7 @@ def _delete_branch(root, branch, force):
 def cmd_merge(args):
     project, branch = resolve_project_and_branch(args)
     root = check_project(project)
-    path = worktree_path(project, branch)
+    path = getattr(args, "worktree_dir", None) or worktree_path(project, branch)
 
     if not os.path.isdir(path):
         die(f"worktree not found: {path}")
@@ -287,7 +312,7 @@ def cmd_merge(args):
 def cmd_path(args):
     project, branch = resolve_project_and_branch(args)
     check_project(project)
-    path = worktree_path(project, branch)
+    path = getattr(args, "worktree_dir", None) or worktree_path(project, branch)
     if not os.path.isdir(path):
         die(f"worktree not found: {path}")
     print(path)
@@ -351,8 +376,15 @@ def build_parser():
     )
     sub = parser.add_subparsers(dest="subcommand")
 
-    def add_common(p, branch_help="branch (or <project>/<branch>)"):
-        p.add_argument("branch", help=branch_help)
+    def add_common(p, optional_branch=False):
+        branch_help = "branch (or <project>/<branch>)"
+        if optional_branch:
+            p.add_argument(
+                "branch", nargs="?", default=None,
+                help=branch_help + " (default: worktree containing the current directory)",
+            )
+        else:
+            p.add_argument("branch", help=branch_help)
         p.add_argument("--project", help="project name under ~/ws")
 
     p_add = sub.add_parser("add", help="create a worktree + cmux workspace")
@@ -362,16 +394,16 @@ def build_parser():
     p_add.set_defaults(func=cmd_add)
 
     p_rm = sub.add_parser("rm", aliases=["remove"], help="remove a worktree + branch")
-    add_common(p_rm)
+    add_common(p_rm, optional_branch=True)
     p_rm.add_argument("--force", action="store_true", help="force removal of dirty worktree/branch")
     p_rm.set_defaults(func=cmd_rm)
 
     p_merge = sub.add_parser("merge", help="merge branch into main checkout, then clean up")
-    add_common(p_merge)
+    add_common(p_merge, optional_branch=True)
     p_merge.set_defaults(func=cmd_merge)
 
     p_open = sub.add_parser("open", help="focus or create a cmux workspace for a worktree")
-    add_common(p_open)
+    add_common(p_open, optional_branch=True)
     p_open.add_argument("--cmd", help="command to run if a new workspace is created")
     p_open.add_argument("--no-focus", action="store_true", help="don't focus the workspace")
     p_open.set_defaults(func=cmd_open)
@@ -381,7 +413,7 @@ def build_parser():
     p_ls.set_defaults(func=cmd_ls)
 
     p_path = sub.add_parser("path", help="print a worktree's path")
-    add_common(p_path)
+    add_common(p_path, optional_branch=True)
     p_path.set_defaults(func=cmd_path)
 
     return parser
