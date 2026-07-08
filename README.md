@@ -1,6 +1,7 @@
 # cmux-config
 
-Home project for my cmux customization work.
+Personal cmux customizations: a worktree/session helper, a sidebar
+auto-grouping daemon, and a Claude skill — installed with one script.
 
 ## What's set up
 
