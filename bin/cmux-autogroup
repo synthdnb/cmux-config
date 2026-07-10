@@ -33,6 +33,7 @@ MIN_SESSIONS = 1  # minimum candidates for a project before we create a group
 CMUX_TIMEOUT = 10  # seconds, for every cmux subprocess call
 DEBOUNCE_SECONDS = 2.0
 FORCE_SWEEP_INTERVAL = 60.0
+GROUP_GRACE_SECONDS = 30.0  # keep a just-created managed group even if the cmux group list hasn't caught up yet
 MAX_LOG_BYTES = 1024 * 1024
 
 # Set at startup based on --dry-run; when true, log() also echoes to stdout.
@@ -139,6 +140,10 @@ def load_state():
         return default_state()
     data.setdefault("assignments", {})
     data.setdefault("managed_groups", {})
+    mg = data["managed_groups"]
+    for gid, rec in list(mg.items()):
+        if not isinstance(rec, dict):
+            mg[gid] = {"project": rec, "created_at": 0}
     return data
 
 
@@ -162,6 +167,16 @@ def save_state(state, dry_run=False):
             raise
     except OSError as e:
         log(f"ERROR: failed to save state file {STATE_FILE}: {e}")
+
+
+def managed_project_of(state, gid):
+    """Project name for a managed group id, or None. Tolerates legacy str records."""
+    rec = state["managed_groups"].get(gid)
+    if rec is None:
+        return None
+    if isinstance(rec, dict):
+        return rec.get("project")
+    return rec
 
 
 # --------------------------------------------------------------------------
@@ -355,8 +370,17 @@ def sweep(dry_run=False):
 
     # Prune managed_groups entries whose group no longer exists, so a
     # deleted/ungrouped project group can be recreated once the threshold
-    # is met again.
+    # is met again. A group missing from the snapshot but still within its
+    # creation grace period is kept, since cmux's group list is eventually
+    # consistent and may just not have caught up yet.
+    now = time.time()
     for gid in [g for g in state["managed_groups"] if g not in groups_by_id]:
+        rec = state["managed_groups"][gid]
+        created = rec.get("created_at", 0) if isinstance(rec, dict) else 0
+        if now - created < GROUP_GRACE_SECONDS:
+            log(f"managed group {gid} ({managed_project_of(state, gid)}) not visible in "
+                f"snapshot yet; keeping within {GROUP_GRACE_SECONDS:.0f}s grace")
+            continue
         proj = state["managed_groups"].pop(gid)
         log(f"pruned stale managed_groups record {gid} ({proj}); group no longer exists")
 
@@ -381,7 +405,7 @@ def sweep(dry_run=False):
         # wrong project -- e.g. cwd misdetected at creation -- whose assignment
         # record was since lost. Unmanaged / user-created groups are left alone.
         managed_project = (
-            state["managed_groups"].get(current_group_id) if current_group_id else None
+            managed_project_of(state, current_group_id) if current_group_id else None
         )
         if managed_project is not None and desired_project != managed_project:
             log(
@@ -439,13 +463,18 @@ def sweep(dry_run=False):
 
     for project, ids in candidates.items():
         managed_gid = next(
-            (gid for gid, proj in state["managed_groups"].items() if proj == project and gid in groups_by_id),
+            (gid for gid, rec in state["managed_groups"].items()
+             if managed_project_of(state, gid) == project),
             None,
         )
         if managed_gid:
-            for wid in ids:
-                if add_to_group(managed_gid, wid, dry_run):
-                    record_assignment(state, wid, managed_gid, project, workspaces_by_id[wid])
+            if managed_gid in groups_by_id:
+                for wid in ids:
+                    if add_to_group(managed_gid, wid, dry_run):
+                        record_assignment(state, wid, managed_gid, project, workspaces_by_id[wid])
+            else:
+                log(f"deferring project '{project}': managed group {managed_gid} not visible "
+                    f"in snapshot yet; will file candidates {ids} on a later sweep")
             continue
 
         unmanaged_gid = group_name_to_id.get(project)
@@ -460,7 +489,7 @@ def sweep(dry_run=False):
             new_gid = create_group(project, root, ids, dry_run)
             if new_gid:
                 set_icon(new_gid, dry_run)
-                state["managed_groups"][new_gid] = project
+                state["managed_groups"][new_gid] = {"project": project, "created_at": time.time()}
                 for wid in ids:
                     record_assignment(state, wid, new_gid, project, workspaces_by_id[wid])
         else:
