@@ -9,6 +9,22 @@ PLIST_SRC="$REPO_DIR/launchd/${AGENT_LABEL}.plist"
 
 declare -a SUMMARY=()
 
+# Remove any *other* LaunchAgent that also runs cmux-autogroup. Two daemons
+# racing the same script (e.g. a legacy personal agent left over from before
+# this repo) corrupt the shared state file and spawn duplicate sidebar groups.
+shopt -s nullglob
+for other in "$HOME/Library/LaunchAgents"/*.plist; do
+  base="$(basename "$other" .plist)"
+  [ "$base" = "$AGENT_LABEL" ] && continue
+  if grep -q "cmux-autogroup" "$other" 2>/dev/null; then
+    launchctl bootout "gui/$UID/$base" >/dev/null 2>&1 || true
+    mv "$other" "${other}.disabled.$(date +%Y%m%d%H%M%S)"
+    echo "removed conflicting agent: $base"
+    SUMMARY+=("removed conflicting agent: $base")
+  fi
+done
+shopt -u nullglob
+
 # link_file <repo-relative-src> <abs-dest>
 link_file() {
   local rel_src="$1"

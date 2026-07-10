@@ -12,6 +12,7 @@ Python 3 stdlib only.
 """
 
 import argparse
+import fcntl
 import json
 import os
 import queue
@@ -27,6 +28,7 @@ WS_ROOT = Path(os.path.expanduser(os.environ.get("CMUX_WS_ROOT", "~/ws")))
 STATE_DIR = Path.home() / ".local" / "state" / "cmux-autogroup"
 STATE_FILE = STATE_DIR / "state.json"
 LOG_FILE = STATE_DIR / "cmux-autogroup.log"
+LOCK_FILE = STATE_DIR / "cmux-autogroup.lock"
 CMUX_FALLBACK = "/Applications/cmux.app/Contents/Resources/bin/cmux"
 
 MIN_SESSIONS = 1  # minimum candidates for a project before we create a group
@@ -37,6 +39,9 @@ MAX_LOG_BYTES = 1024 * 1024
 
 # Set at startup based on --dry-run; when true, log() also echoes to stdout.
 _ECHO_STDOUT = False
+
+# Held open for the process lifetime to keep the flock; see acquire_singleton_lock.
+_LOCK_FD = None
 
 
 def find_cmux_bin():
@@ -72,6 +77,27 @@ def log(msg):
         pass
     if _ECHO_STDOUT:
         print(line)
+
+
+def acquire_singleton_lock():
+    """Take an exclusive, non-blocking flock so only one daemon runs at a
+    time. Returns True on success, False if another instance holds it. The
+    fd is kept open in a module global for the process lifetime; the lock
+    releases automatically when the process exits."""
+    global _LOCK_FD
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as e:
+        log(f"ERROR: could not open lock file {LOCK_FILE}: {e}")
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    _LOCK_FD = fd
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -570,8 +596,14 @@ def main():
 
     if args.mode == "sweep":
         _ECHO_STDOUT = bool(args.dry_run)
+        if not args.dry_run and not acquire_singleton_lock():
+            log("another cmux-autogroup instance is running; skipping sweep")
+            return
         sweep(dry_run=args.dry_run)
     elif args.mode == "watch":
+        if not acquire_singleton_lock():
+            log("another cmux-autogroup instance already holds the lock; exiting")
+            return
         watch()
 
 
