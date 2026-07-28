@@ -17,7 +17,7 @@ These files are versioned in this repo and symlinked/copied into place by
   cmux sessions: `cw add|open|rm|merge|ls|path <branch>`, project inferred
   from cwd or `<project>/<branch>`. `CW_DEFAULT_CMD` / `--cmd` starts an agent
   in new sessions.
-- **`cmux-issue` Claude skill** — `~/.claude/skills/cmux-issue`. Launches a
+- **`cmux-dispatch` Claude skill** — `~/.claude/skills/cmux-dispatch`. Launches a
   Linear issue as an autonomous cmux session: fetches the ticket, writes a
   prompt, and runs `cw add <branch> --cmd 'claude --permission-mode=…'` so an
   agent implements it end to end through a draft PR. Builds on `cw`.
@@ -38,7 +38,7 @@ cmux-config/
   bin/cw                                     # -> ~/.local/bin/cw
   bin/cmux-autogroup                         # -> ~/.local/bin/cmux-autogroup
   launchd/com.cmux.autogroup.plist           # -> ~/Library/LaunchAgents/
-  skills/cmux-issue/                          # -> ~/.claude/skills/cmux-issue
+  skills/cmux-dispatch/                       # -> ~/.claude/skills/cmux-dispatch
 ```
 
 ## Install
