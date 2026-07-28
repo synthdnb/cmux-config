@@ -1,10 +1,10 @@
 ---
-name: cmux-issue
+name: cmux-dispatch
 description: "Launch a Linear issue as an autonomous cmux session: create a git worktree via `cw`, start Claude with bypassPermissions, and drive it until a draft PR is open. Use when the user says to launch/open/spin up a cmux session for a Linear issue (e.g. ABC-123), 'implement this issue in cmux', or dispatch one or more issues to worktrees."
 allowed-tools: Bash, Write
 ---
 
-# cmux-issue
+# cmux-dispatch
 
 Turn one or more Linear issues into autonomous cmux sessions. For each issue you
 create a git worktree (via `cw`, the cmux-native worktree manager), open a cmux
@@ -47,7 +47,7 @@ the spec. Ask the user only if you cannot form a prompt at all.
 
 ### 1a. Umbrella issues: dispatch the children instead
 
-Issues follow the `linear-issue` skill's conventions: an **umbrella**
+Issues follow the `file-issue` skill's conventions: an **umbrella**
 issue is a Korean, human-facing summary; its **sub-issues** are
 self-contained English specs written to be fed to agents.
 
@@ -65,7 +65,7 @@ self-contained English specs written to be fed to agents.
 
 Write a self-contained prompt to the **scratchpad** (absolute path, since the
 new workspace shell will `cat` it), e.g.
-`<scratchpad>/cmux-issue-<branch>.txt`. Use RELATIVE paths inside the prompt —
+`<scratchpad>/cmux-dispatch-<branch>.txt`. Use RELATIVE paths inside the prompt —
 each worktree has its own root. The prompt MUST contain:
 
 - The issue identifier, title, and URL, and an instruction to run
@@ -75,7 +75,7 @@ each worktree has its own root. The prompt MUST contain:
   the agent works even without Linear access. Preserve the file paths / line
   refs / decisions from the ticket.
 - If the description starts with a `## 요약` section (Korean TL;DR for
-  coworkers, per the `linear-issue` conventions), paste it verbatim
+  coworkers, per the `file-issue` conventions), paste it verbatim
   anyway, but add this line to the prompt: "The `## 요약` section is a
   Korean summary for coworkers; the English sections below it are the
   authoritative spec. Work and write in English."
@@ -123,7 +123,7 @@ The user stays where they are and opens a session themselves when ready.
 ```bash
 SP=<scratchpad>
 cw add <branchName> --no-focus \
-  --cmd "claude --permission-mode=bypassPermissions \"\$(cat $SP/cmux-issue-<branch>.txt)\""
+  --cmd "claude --permission-mode=bypassPermissions \"\$(cat $SP/cmux-dispatch-<branch>.txt)\""
 ```
 
 Notes:
@@ -159,7 +159,7 @@ Print a table: issue ID → branch/worktree path → cmux workspace ref → stat
 
 ## Related skills
 
-- `linear-issue` — composes the umbrella/sub-issue structure these
+- `file-issue` — composes the umbrella/sub-issue structure these
   sessions consume (Korean umbrella for humans, English sub-issues for
   agents).
 - `cmux-cli` — full cmux command reference and socket/focus safety rules.
