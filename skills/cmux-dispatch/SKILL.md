@@ -97,19 +97,32 @@ each worktree has its own root. The prompt MUST contain:
   3. Commit on branch <branchName> with a clear message. (Claude Code
      appends its own accurate attribution trailer — do not add one.)
   4. Push the branch: git push -u origin HEAD
-  5. Open a DRAFT PR: gh pr create --draft --base main
-     - Title: concise, <=72 chars.
-     - Body: summary + key changes + testing, and a link to <issue URL>.
-       (Branch name matches the Linear branchName, so Linear auto-links
-       the PR — do not add a closing keyword.) End the body with:
+  5. Run the code-review skill on your changes: /code-review high --fix
+     Commit and push any fixes it applies. (/code-review is an
+     Anthropic-managed skill and its syntax may change — if that exact
+     invocation errors, check the skill's current usage and run the
+     closest equivalent at high effort with fixes applied; don't skip
+     the review.)
+  6. Open a DRAFT PR: gh pr create --draft --base main
+     - Title: concise, <=72 chars, English.
+     - Body: start with a `## 요약` section — a 1–2 sentence Korean TL;DR
+       of the change for coworkers scanning the PR (same convention as
+       `file-issue` sub-issues). Compose the summary in English first,
+       then rewrite it as natural Korean (자연스러운 한국어로 재작성) —
+       never literal sentence-by-sentence translation.
+     - After 요약, the rest of the body in English: summary + key changes
+       + testing, and a link to <issue URL>. (Branch name matches the
+       Linear branchName, so Linear auto-links the PR — do not add a
+       closing keyword.) End the body with:
        🤖 Generated with [Claude Code](https://claude.com/claude-code)
-  6. Report the PR URL and a one-line status as your final message.
+  7. Report the PR URL and a one-line status as your final message.
 
   If tests cannot pass or you hit a genuine blocker, still open the draft PR
   with a "⚠️ blocked" note in the body explaining what's incomplete, then
   report the blocker.
 
-  Write everything you produce (code, commits, PR title/body) in English.
+  Write everything you produce (code, commits, PR title/body) in English —
+  the one exception is the PR body's `## 요약` section, which is Korean.
   If you comment on the Linear issue, match the language already used in
   that thread.
   ```
