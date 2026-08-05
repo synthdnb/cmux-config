@@ -1,0 +1,116 @@
+#!/bin/bash
+# cmux-session-cleanup: end a cmux-dispatched session by removing this
+# session's git worktree, deleting its branch, and closing the current cmux
+# workspace. No-LLM port of the cmux-cleanup skill, meant to run from a
+# cmux tab-bar button in a fresh interactive tab (so CMUX_WORKSPACE_ID is
+# set and error output stays visible after exit).
+set -uo pipefail
+
+FORCE=false
+for arg in "$@"; do
+  case "$arg" in
+    --force)
+      FORCE=true
+      ;;
+    *)
+      echo "usage: cmux-session-cleanup [--force]" >&2
+      exit 2
+      ;;
+  esac
+done
+
+# cw lives here; prepend so it's found regardless of the caller's PATH.
+export PATH="$HOME/.local/bin:$PATH"
+
+CMUX_BIN=""
+if command -v cmux >/dev/null 2>&1; then
+  CMUX_BIN="cmux"
+elif [ -x /Applications/cmux.app/Contents/Resources/bin/cmux ]; then
+  CMUX_BIN=/Applications/cmux.app/Contents/Resources/bin/cmux
+fi
+if [ -z "$CMUX_BIN" ]; then
+  echo "cmux-session-cleanup: cmux CLI not found on PATH or at the default install location" >&2
+  echo "Nothing was removed; workspace left open." >&2
+  exit 1
+fi
+
+fail() {
+  echo "cmux-session-cleanup: $1" >&2
+  echo "Nothing was removed; workspace left open." >&2
+  exit 1
+}
+
+# Guard 1: only makes sense inside a cmux session.
+if [ -z "${CMUX_WORKSPACE_ID:-}" ]; then
+  fail "CMUX_WORKSPACE_ID is not set; this is not a cmux session"
+fi
+
+# Guard 2: must be inside a git repo, and a linked worktree, never the main checkout.
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  fail "not inside a git repository"
+fi
+if [ "$(git rev-parse --git-dir)" = "$(git rev-parse --git-common-dir)" ]; then
+  fail "this is the main checkout, not a worktree; refusing to remove it"
+fi
+
+# Guard 3: no unsaved work, unless --force.
+if [ "$FORCE" = false ]; then
+  dirty="$(git status --porcelain)"
+  if [ -n "$dirty" ]; then
+    fail "worktree has unsaved changes (use --force to override):
+$dirty"
+  fi
+
+  if ! git rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+    fail "no upstream configured — treat as unpushed work (use --force to override)"
+  fi
+
+  unpushed="$(git log --oneline '@{u}..')"
+  if [ -n "$unpushed" ]; then
+    fail "unpushed commits (use --force to override):
+$unpushed"
+  fi
+fi
+
+# Gather facts before cd'ing anywhere.
+WT=$(git rev-parse --show-toplevel)
+BR=$(git branch --show-current)
+MAIN=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+PROJ=$(basename "$MAIN")
+
+echo "Removing worktree=$WT branch=$BR project=$PROJ workspace=$CMUX_WORKSPACE_ID"
+
+# Nothing after this should hold a reference into $WT, or removal will fail.
+cd "$HOME" || fail "could not cd to \$HOME"
+
+removed=false
+if [ -n "$BR" ] && command -v cw >/dev/null 2>&1; then
+  cw_args=(rm --project "$PROJ" "$BR")
+  [ "$FORCE" = true ] && cw_args+=(--force)
+  if cw "${cw_args[@]}"; then
+    removed=true
+    # cw rm only warns (still exits 0) when the branch is unmerged, so close
+    # that gap here; safe because guard 3 already proved everything is pushed.
+    if git -C "$MAIN" show-ref --verify --quiet "refs/heads/$BR"; then
+      git -C "$MAIN" branch -D "$BR" || fail "cw rm succeeded but branch -D $BR failed"
+    fi
+  fi
+fi
+
+if [ "$removed" = false ]; then
+  if ! git -C "$MAIN" worktree remove "$WT" --force; then
+    fail "git worktree remove failed for $WT"
+  fi
+  if [ -n "$BR" ] && git -C "$MAIN" show-ref --verify --quiet "refs/heads/$BR"; then
+    git -C "$MAIN" branch -D "$BR" || fail "worktree removed but branch -D $BR failed"
+  fi
+fi
+
+if [ -e "$WT" ]; then
+  fail "worktree path $WT still exists after removal"
+fi
+
+if ! "$CMUX_BIN" close-workspace --workspace "$CMUX_WORKSPACE_ID"; then
+  echo "cmux-session-cleanup: worktree and branch removed, but closing the cmux workspace failed" >&2
+  exit 1
+fi

@@ -51,6 +51,7 @@ link_file() {
 
 link_file bin/cw "$HOME/.local/bin/cw"
 link_file bin/cmux-autogroup "$HOME/.local/bin/cmux-autogroup"
+link_file bin/cmux-session-cleanup "$HOME/.local/bin/cmux-session-cleanup"
 
 # Plist is rendered from a template (with the local $HOME substituted in) and
 # copied, not symlinked -- launchd mistrusts symlinked agent plists.
