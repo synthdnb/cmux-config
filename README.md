@@ -20,6 +20,10 @@ These files are versioned in this repo and symlinked/copied into place by
 - The `cmux-dispatch` skill moved to the `control-plane` repo
   (`~/ws/control-plane/.claude/skills/cmux-dispatch`), which owns the
   Linear→cmux dispatch pipeline.
+- **`cmux-session-cleanup`** — `~/.local/bin/cmux-session-cleanup`. Deterministic,
+  no-LLM teardown of a cmux-dispatched session: removes the session's git
+  worktree, deletes its branch, and closes the current cmux workspace.
+  Invoked by a clickable cmux tab-bar button, not run by hand.
 
 ## Configuration
 
@@ -36,6 +40,7 @@ cmux-config/
   install.sh                                 # idempotent installer
   bin/cw                                     # -> ~/.local/bin/cw
   bin/cmux-autogroup                         # -> ~/.local/bin/cmux-autogroup
+  bin/cmux-session-cleanup                   # -> ~/.local/bin/cmux-session-cleanup
   launchd/com.cmux.autogroup.plist           # -> ~/Library/LaunchAgents/
 ```
 
