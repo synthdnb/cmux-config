@@ -8,6 +8,9 @@ Modes:
                                       re-sweep on change (debounced) and
                                       at least every 60s regardless
 
+Managed groups left empty (anchor-only, no real member workspaces) beyond a
+grace period are deleted, closing their anchor workspace.
+
 Python 3 stdlib only.
 """
 
@@ -36,6 +39,7 @@ CMUX_TIMEOUT = 10  # seconds, for every cmux subprocess call
 DEBOUNCE_SECONDS = 2.0
 FORCE_SWEEP_INTERVAL = 60.0
 MAX_LOG_BYTES = 1024 * 1024
+EMPTY_GROUP_GRACE_SECONDS = 300  # anchor-only managed groups older than this get deleted
 
 # Set at startup based on --dry-run; when true, log() also echoes to stdout.
 _ECHO_STDOUT = False
@@ -151,7 +155,7 @@ def pick(d, *keys):
 # --------------------------------------------------------------------------
 
 def default_state():
-    return {"assignments": {}, "managed_groups": {}}
+    return {"assignments": {}, "managed_groups": {}, "empty_groups": {}}
 
 
 def load_state():
@@ -165,6 +169,7 @@ def load_state():
         return default_state()
     data.setdefault("assignments", {})
     data.setdefault("managed_groups", {})
+    data.setdefault("empty_groups", {})
     return data
 
 
@@ -353,6 +358,18 @@ def set_icon(gid, dry_run):
         log(f"ERROR: failed to set icon for group {gid}")
 
 
+def delete_group(gid, project, dry_run):
+    if dry_run:
+        log(f"[dry-run] would run: workspace-group delete {gid} --close-workspaces (empty group, project {project})")
+        return True
+    resp = run_cmux_json(["workspace-group", "delete", gid, "--close-workspaces", "--json"])
+    if resp is None:
+        log(f"ERROR: failed to delete empty group {gid} (project {project})")
+        return False
+    log(f"deleted empty group {gid} (project {project}); closed its anchor workspace")
+    return True
+
+
 def record_assignment(state, wid, gid, project, ws):
     state["assignments"][wid] = {
         "group_id": gid,
@@ -361,6 +378,74 @@ def record_assignment(state, wid, gid, project, ws):
         "opt_out": False,
     }
     log(f"recorded assignment: workspace {wid} -> group {gid} (project {project})")
+
+
+# --------------------------------------------------------------------------
+# Empty group cleanup
+# --------------------------------------------------------------------------
+
+def cleanup_empty_groups(state, groups_by_id, touched_gids, dry_run):
+    """Delete managed groups that have gone anchor-only (no real member
+    workspaces) for longer than EMPTY_GROUP_GRACE_SECONDS. Groups touched
+    this sweep (just got a new member/were just created) are exempt, since
+    groups_by_id is a stale pre-mutation fetch and would otherwise look
+    empty."""
+    empty = state["empty_groups"]
+
+    # Drop stale tracking: gid no longer managed or no longer exists.
+    for gid in [
+        g for g in empty if g not in state["managed_groups"] or g not in groups_by_id
+    ]:
+        del empty[gid]
+
+    for gid, project in list(state["managed_groups"].items()):
+        g = groups_by_id.get(gid)
+        if g is None:
+            continue
+
+        if gid in touched_gids:
+            empty.pop(gid, None)
+            continue
+
+        anchor = pick(
+            g,
+            "anchor_workspace_id",
+            "anchor_workspace_ref",
+            "anchorWorkspaceId",
+            "anchorWorkspaceRef",
+        )
+        members = (
+            pick(
+                g,
+                "member_workspace_ids",
+                "workspace_ids",
+                "members",
+                "member_workspace_refs",
+                "memberWorkspaceRefs",
+                "workspaceIds",
+            )
+            or []
+        )
+        real = [m for m in members if m != anchor]
+        if real:
+            empty.pop(gid, None)
+            continue
+
+        if gid not in empty:
+            empty[gid] = time.time()
+            log(
+                f"group {gid} (project {project}) is empty (anchor-only); will delete "
+                f"after {EMPTY_GROUP_GRACE_SECONDS}s if still empty"
+            )
+            continue
+
+        elapsed = time.time() - empty[gid]
+        if elapsed < EMPTY_GROUP_GRACE_SECONDS:
+            continue
+
+        if delete_group(gid, project, dry_run):
+            state["managed_groups"].pop(gid, None)
+            empty.pop(gid, None)
 
 
 # --------------------------------------------------------------------------
@@ -463,6 +548,8 @@ def sweep(dry_run=False):
                 continue
             candidates.setdefault(desired_project, []).append(wid)
 
+    touched_gids = set()
+
     for project, ids in candidates.items():
         managed_gid = next(
             (gid for gid, proj in state["managed_groups"].items() if proj == project and gid in groups_by_id),
@@ -472,6 +559,7 @@ def sweep(dry_run=False):
             for wid in ids:
                 if add_to_group(managed_gid, wid, dry_run):
                     record_assignment(state, wid, managed_gid, project, workspaces_by_id[wid])
+                    touched_gids.add(managed_gid)
             continue
 
         unmanaged_gid = group_name_to_id.get(project)
@@ -487,6 +575,7 @@ def sweep(dry_run=False):
             if new_gid:
                 set_icon(new_gid, dry_run)
                 state["managed_groups"][new_gid] = project
+                touched_gids.add(new_gid)
                 for wid in ids:
                     record_assignment(state, wid, new_gid, project, workspaces_by_id[wid])
         else:
@@ -494,6 +583,8 @@ def sweep(dry_run=False):
                 f"project '{project}': workspace(s) {ids} candidate (below threshold): "
                 f"have {len(ids)}, need {MIN_SESSIONS}"
             )
+
+    cleanup_empty_groups(state, groups_by_id, touched_gids, dry_run)
 
     save_state(state, dry_run=dry_run)
 
