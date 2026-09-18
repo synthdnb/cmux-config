@@ -366,6 +366,33 @@ def cmd_ls(args):
             f"{session:<{widths[3]}}  {path}"
         )
 
+def cmd_clean(args):
+    data = cmux_call(["workspace-group", "list"])
+    if data is None:
+        die("could not list workspace groups")
+    orphans = []
+    for g in data.get("groups", []):
+        ref = g.get("ref") or g.get("id")
+        if not ref:
+            continue
+        name = g.get("name") or ref
+        anchor = g.get("anchor_workspace_ref") or g.get("anchor_workspace_id")
+        members = g.get("member_workspace_refs") or g.get("member_workspace_ids") or []
+        real = [m for m in members if m != anchor]
+        if not real:
+            orphans.append((ref, name))
+    if not orphans:
+        print("no orphan groups")
+        return
+    for ref, name in orphans:
+        if args.dry_run:
+            print(f"would delete orphan group: {name} ({ref})")
+            continue
+        if cmux_call(["workspace-group", "delete", ref]) is None:
+            warn(f"failed to delete group {name} ({ref})")
+        else:
+            print(f"deleted orphan group: {name} ({ref})")
+
 # --------------------------------------------------------------------------
 # argument parsing
 # --------------------------------------------------------------------------
@@ -411,6 +438,10 @@ def build_parser():
     p_ls = sub.add_parser("ls", aliases=["list"], help="list worktrees")
     p_ls.add_argument("--project", help="project name under ~/ws")
     p_ls.set_defaults(func=cmd_ls)
+
+    p_clean = sub.add_parser("clean", help="delete orphan sidebar groups (no workspaces under them)")
+    p_clean.add_argument("--dry-run", action="store_true", help="list orphan groups without deleting")
+    p_clean.set_defaults(func=cmd_clean)
 
     p_path = sub.add_parser("path", help="print a worktree's path")
     add_common(p_path, optional_branch=True)
