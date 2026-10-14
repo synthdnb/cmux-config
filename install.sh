@@ -119,12 +119,15 @@ if [ -n "$CMUX_BIN" ]; then
   # which requires automation.socketControlMode "automation" in cmux.json.
   # The socket server reads the mode only at app startup.
   mode="$("$CMUX_BIN" capabilities 2>/dev/null | sed -n 's/.*"access_mode" *: *"\([^"]*\)".*/\1/p')"
-  if [ -n "$mode" ] && [ "$mode" != "automation" ] && [ "$mode" != "allowAll" ] && [ "$mode" != "password" ]; then
-    echo "warning: cmux socket access_mode is '$mode' — the autogroup daemon will be rejected."
-    echo "         Set automation.socketControlMode to \"automation\" in ~/.config/cmux/cmux.json"
-    echo "         and restart cmux (the mode is read only at app startup)."
-    SUMMARY+=("warning: socket access_mode '$mode' blocks the daemon")
-  fi
+  case "$mode" in
+    ""|automation|password|allowAll|openAccess|fullOpenAccess|full) ;;
+    *)
+      echo "warning: cmux socket access_mode is '$mode' — the autogroup daemon will be rejected."
+      echo "         Set automation.socketControlMode to \"automation\" in ~/.config/cmux/cmux.json"
+      echo "         and restart cmux (the mode is read only at app startup)."
+      SUMMARY+=("warning: socket access_mode '$mode' blocks the daemon")
+      ;;
+  esac
 else
   echo "note: cmux not on PATH, skipping socket access_mode check"
   SUMMARY+=("skipped: socket access_mode check (cmux not found)")

@@ -110,7 +110,7 @@ if [ -e "$WT" ]; then
   fail "worktree path $WT still exists after removal"
 fi
 
-if ! "$CMUX_BIN" close-workspace --workspace "$CMUX_WORKSPACE_ID"; then
+if ! "$CMUX_BIN" workspace close "$CMUX_WORKSPACE_ID"; then
   echo "cmux-session-cleanup: worktree and branch removed, but closing the cmux workspace failed" >&2
   exit 1
 fi
