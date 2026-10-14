@@ -59,10 +59,27 @@ agent_loaded() {
   launchctl print "gui/$UID/${AGENT_LABEL}" >/dev/null 2>&1
 }
 
+# Pick the interpreter the daemon runs under. /usr/bin/python3 is Apple's
+# Xcode shim: whenever Xcode updates and the license has not been re-accepted,
+# the shim exits 69 and launchd crash-loops the daemon. Prefer a Homebrew
+# python3 via the version-independent python@3 link (Apple Silicon, then
+# Intel), and fall back to the shim only when neither exists.
+pick_python() {
+  local candidate
+  for candidate in /opt/homebrew/opt/python@3/bin/python3 /usr/local/opt/python@3/bin/python3; do
+    if [ -x "$candidate" ] && "$candidate" -c 'import fcntl, json' >/dev/null 2>&1; then
+      echo "$candidate"
+      return
+    fi
+  done
+  echo /usr/bin/python3
+}
+PYTHON_BIN="$(pick_python)"
+
 render_plist() {
   local ws_root="${CMUX_WS_ROOT:-$HOME/ws}"
   ws_root="${ws_root/#\~/$HOME}"
-  sed -e "s|__HOME__|$HOME|g" -e "s|__WS_ROOT__|$ws_root|g" "$PLIST_SRC"
+  sed -e "s|__HOME__|$HOME|g" -e "s|__WS_ROOT__|$ws_root|g" -e "s|__PYTHON__|$PYTHON_BIN|g" "$PLIST_SRC"
 }
 
 plist_state="ok (current)"
@@ -91,6 +108,7 @@ fi
 [ "$plist_state" = "ok (current)" ] && plist_state="ok (current): $PLIST_DEST"
 SUMMARY+=("$plist_state")
 SUMMARY+=("ws root: ${CMUX_WS_ROOT:-$HOME/ws}")
+SUMMARY+=("python: $PYTHON_BIN")
 
 mkdir -p "$HOME/.local/state/cmux-autogroup"
 
