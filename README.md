@@ -52,8 +52,11 @@ cmux-config/
 
 Idempotent — safe to re-run; backs up anything it replaces with timestamped
 `.bak.<YYYYmmddHHMMSS>` files. The launchd plist is rendered from a template
-with the local `$HOME` substituted in and copied into place (not symlinked),
-since launchd mistrusts symlinked agent plists; everything else is symlinked.
+with the local `$HOME` and a python3 interpreter substituted in and copied into
+place (not symlinked), since launchd mistrusts symlinked agent plists;
+everything else is symlinked. The installer prefers Homebrew's `python@3`
+over `/usr/bin/python3`: the Apple shim exits 69 after every Xcode update
+until the license is re-accepted, which crash-loops the daemon.
 
 **Requirement:** the autogroup daemon runs outside cmux, so cmux's control
 socket must allow it: set `automation.socketControlMode` to `"automation"` in
