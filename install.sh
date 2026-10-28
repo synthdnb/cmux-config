@@ -1,29 +1,17 @@
 #!/bin/bash
 set -euo pipefail
 
+# Installs cw into ~/.local/bin.
+#
+# cmux-autogroup (and its com.cmux.autogroup launchd agent) and
+# cmux-session-cleanup were retired: dispatch moved to Rex via the
+# rex-dispatch / rex-cleanup skills in personal-agent-config. Re-running this
+# script does not remove previously installed copies; see "Retired" in
+# README.md for the one-time manual cleanup.
+
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-AGENT_LABEL="com.cmux.autogroup"
-PLIST_DEST="$HOME/Library/LaunchAgents/${AGENT_LABEL}.plist"
-PLIST_SRC="$REPO_DIR/launchd/${AGENT_LABEL}.plist"
-
 declare -a SUMMARY=()
-
-# Remove any *other* LaunchAgent that also runs cmux-autogroup. Two daemons
-# racing the same script (e.g. a legacy personal agent left over from before
-# this repo) corrupt the shared state file and spawn duplicate sidebar groups.
-shopt -s nullglob
-for other in "$HOME/Library/LaunchAgents"/*.plist; do
-  base="$(basename "$other" .plist)"
-  [ "$base" = "$AGENT_LABEL" ] && continue
-  if grep -q "cmux-autogroup" "$other" 2>/dev/null; then
-    launchctl bootout "gui/$UID/$base" >/dev/null 2>&1 || true
-    mv "$other" "${other}.disabled.$(date +%Y%m%d%H%M%S)"
-    echo "removed conflicting agent: $base"
-    SUMMARY+=("removed conflicting agent: $base")
-  fi
-done
-shopt -u nullglob
 
 # link_file <repo-relative-src> <abs-dest>
 link_file() {
@@ -50,106 +38,6 @@ link_file() {
 }
 
 link_file bin/cw "$HOME/.local/bin/cw"
-link_file bin/cmux-autogroup "$HOME/.local/bin/cmux-autogroup"
-link_file bin/cmux-session-cleanup "$HOME/.local/bin/cmux-session-cleanup"
-
-# Plist is rendered from a template (with the local $HOME substituted in) and
-# copied, not symlinked -- launchd mistrusts symlinked agent plists.
-agent_loaded() {
-  launchctl print "gui/$UID/${AGENT_LABEL}" >/dev/null 2>&1
-}
-
-# Pick the interpreter the daemon runs under. /usr/bin/python3 is Apple's
-# Xcode shim: whenever Xcode updates and the license has not been re-accepted,
-# the shim exits 69 and launchd crash-loops the daemon. Prefer a Homebrew
-# python3 via the version-independent python@3 link (Apple Silicon, then
-# Intel), and fall back to the shim only when neither exists.
-pick_python() {
-  local candidate
-  for candidate in /opt/homebrew/opt/python@3/bin/python3 /usr/local/opt/python@3/bin/python3; do
-    if [ -x "$candidate" ] && "$candidate" -c 'import fcntl, json' >/dev/null 2>&1; then
-      echo "$candidate"
-      return
-    fi
-  done
-  echo /usr/bin/python3
-}
-PYTHON_BIN="$(pick_python)"
-
-render_plist() {
-  local ws_root="${CMUX_WS_ROOT:-$HOME/ws}"
-  ws_root="${ws_root/#\~/$HOME}"
-  sed -e "s|__HOME__|$HOME|g" -e "s|__WS_ROOT__|$ws_root|g" -e "s|__PYTHON__|$PYTHON_BIN|g" "$PLIST_SRC"
-}
-
-plist_state="ok (current)"
-if [ -e "$PLIST_DEST" ]; then
-  if diff -q <(render_plist) "$PLIST_DEST" >/dev/null 2>&1; then
-    echo "ok (current): $PLIST_DEST"
-  else
-    bak="${PLIST_DEST}.bak.$(date +%Y%m%d%H%M%S)"
-    mv "$PLIST_DEST" "$bak"
-    echo "backed up $PLIST_DEST -> $bak"
-    render_plist > "$PLIST_DEST"
-    echo "copied: $PLIST_DEST"
-    plist_state="copied (updated): $PLIST_DEST"
-    if agent_loaded; then
-      launchctl bootout "gui/$UID/${AGENT_LABEL}" >/dev/null 2>&1 || true
-      launchctl bootstrap "gui/$UID" "$PLIST_DEST"
-      echo "reloaded: ${AGENT_LABEL}"
-    fi
-  fi
-else
-  mkdir -p "$(dirname "$PLIST_DEST")"
-  render_plist > "$PLIST_DEST"
-  echo "copied: $PLIST_DEST"
-  plist_state="copied: $PLIST_DEST"
-fi
-[ "$plist_state" = "ok (current)" ] && plist_state="ok (current): $PLIST_DEST"
-SUMMARY+=("$plist_state")
-SUMMARY+=("ws root: ${CMUX_WS_ROOT:-$HOME/ws}")
-SUMMARY+=("python: $PYTHON_BIN")
-
-mkdir -p "$HOME/.local/state/cmux-autogroup"
-
-if ! agent_loaded; then
-  if launchctl bootstrap "gui/$UID" "$PLIST_DEST" 2>/dev/null; then
-    echo "bootstrapped: ${AGENT_LABEL}"
-    SUMMARY+=("bootstrapped: ${AGENT_LABEL}")
-  else
-    echo "warning: could not bootstrap ${AGENT_LABEL} (no GUI session? SSH?)"
-    SUMMARY+=("warning: ${AGENT_LABEL} not loaded")
-  fi
-else
-  SUMMARY+=("ok (loaded): ${AGENT_LABEL}")
-fi
-
-# Best-effort cmux socket check.
-CMUX_BIN=""
-if command -v cmux >/dev/null 2>&1; then
-  CMUX_BIN="cmux"
-elif [ -x /Applications/cmux.app/Contents/Resources/bin/cmux ]; then
-  CMUX_BIN=/Applications/cmux.app/Contents/Resources/bin/cmux
-fi
-
-if [ -n "$CMUX_BIN" ]; then
-  # The autogroup daemon talks to the cmux socket from launchd (outside cmux),
-  # which requires automation.socketControlMode "automation" in cmux.json.
-  # The socket server reads the mode only at app startup.
-  mode="$("$CMUX_BIN" capabilities 2>/dev/null | sed -n 's/.*"access_mode" *: *"\([^"]*\)".*/\1/p')"
-  case "$mode" in
-    ""|automation|password|allowAll|openAccess|fullOpenAccess|full) ;;
-    *)
-      echo "warning: cmux socket access_mode is '$mode' — the autogroup daemon will be rejected."
-      echo "         Set automation.socketControlMode to \"automation\" in ~/.config/cmux/cmux.json"
-      echo "         and restart cmux (the mode is read only at app startup)."
-      SUMMARY+=("warning: socket access_mode '$mode' blocks the daemon")
-      ;;
-  esac
-else
-  echo "note: cmux not on PATH, skipping socket access_mode check"
-  SUMMARY+=("skipped: socket access_mode check (cmux not found)")
-fi
 
 echo
 echo "Summary:"

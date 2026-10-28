@@ -1,37 +1,25 @@
 # cmux-config
 
-Personal cmux customizations: a worktree/session helper, a sidebar
-auto-grouping daemon, and a Claude skill — installed with one script.
+Personal cmux customizations: `cw`, a worktree/session helper, installed with
+one script.
 
 ## What's set up
 
-These files are versioned in this repo and symlinked/copied into place by
+This file is versioned in this repo and symlinked into place by
 `./install.sh`:
 
-- **Sidebar auto-grouping** — `~/.local/bin/cmux-autogroup`, run by the launchd
-  agent `com.cmux.autogroup` (`~/Library/LaunchAgents/`). Groups cmux
-  workspaces into native sidebar groups by root project under `~/ws`;
-  worktree sessions (`~/ws/<project>__worktrees/<branch>`) roll up under their
-  parent project. State/log: `~/.local/state/cmux-autogroup/`.
 - **`cw`** — `~/.local/bin/cw`. workmux-style helper managing git worktrees +
   cmux sessions: `cw add|open|rm|merge|ls|path <branch>`, project inferred
   from cwd or `<project>/<branch>`. `CW_DEFAULT_CMD` / `--cmd` starts an agent
   in new sessions.
-- The `cmux-dispatch` skill moved to the `control-plane` repo
-  (`~/ws/control-plane/.claude/skills/cmux-dispatch`), which owns the
-  Linear→cmux dispatch pipeline.
-- **`cmux-session-cleanup`** — `~/.local/bin/cmux-session-cleanup`. Deterministic,
-  no-LLM teardown of a cmux-dispatched session: removes the session's git
-  worktree, deletes its branch, and closes the current cmux workspace.
-  Invoked by a clickable cmux tab-bar button, not run by hand.
+
+The dispatch pipeline now lives in the `personal-agent-config` repo as the
+Rex-based `rex-dispatch` / `dispatch-coordinate` / `rex-cleanup` skills.
 
 ## Configuration
 
-`CMUX_WS_ROOT` overrides the default `~/ws` workspace root for both `cw` and
-the autogroup daemon. `cw` reads it live from your shell environment. The
-daemon can't see shell env vars (launchd), so `install.sh` bakes the current
-`CMUX_WS_ROOT` (or `~/ws`) into the plist at install time — export it before
-running `./install.sh`, and re-run the installer to change it.
+`CMUX_WS_ROOT` overrides the default `~/ws` workspace root for `cw`, which
+reads it live from your shell environment.
 
 ## Layout
 
@@ -39,9 +27,6 @@ running `./install.sh`, and re-run the installer to change it.
 cmux-config/
   install.sh                                 # idempotent installer
   bin/cw                                     # -> ~/.local/bin/cw
-  bin/cmux-autogroup                         # -> ~/.local/bin/cmux-autogroup
-  bin/cmux-session-cleanup                   # -> ~/.local/bin/cmux-session-cleanup
-  launchd/com.cmux.autogroup.plist           # -> ~/Library/LaunchAgents/
 ```
 
 ## Install
@@ -51,19 +36,7 @@ cmux-config/
 ```
 
 Idempotent — safe to re-run; backs up anything it replaces with timestamped
-`.bak.<YYYYmmddHHMMSS>` files. The launchd plist is rendered from a template
-with the local `$HOME` and a python3 interpreter substituted in and copied into
-place (not symlinked), since launchd mistrusts symlinked agent plists;
-everything else is symlinked. The installer prefers Homebrew's `python@3`
-over `/usr/bin/python3`: the Apple shim exits 69 after every Xcode update
-until the license is re-accepted, which crash-loops the daemon.
-
-**Requirement:** the autogroup daemon runs outside cmux, so cmux's control
-socket must allow it: set `automation.socketControlMode` to `"automation"` in
-`~/.config/cmux/cmux.json` and restart cmux — the socket server reads the mode
-only at app startup (the default `cmuxOnly` rejects any process not spawned
-inside cmux with `Broken pipe`). `cmux capabilities | grep access_mode` shows
-the live mode; the installer warns when it's wrong.
+`.bak.<YYYYmmddHHMMSS>` files.
 
 ## Worktree layout
 
@@ -71,3 +44,21 @@ the live mode; the installer warns when it's wrong.
 ~/ws/<project>                     # main checkout
 ~/ws/<project>__worktrees/<branch> # cw / workmux worktrees
 ```
+
+## Retired
+
+`cmux-autogroup` (the sidebar auto-grouping daemon and its
+`com.cmux.autogroup` launchd agent) and `cmux-session-cleanup` (the tab-bar
+session teardown) were removed; dispatch moved to Rex. `./install.sh` no
+longer installs them and does not remove copies a previous version installed.
+One-time manual cleanup on an existing machine:
+
+```
+launchctl bootout gui/$UID/com.cmux.autogroup
+rm ~/Library/LaunchAgents/com.cmux.autogroup.plist
+rm ~/.local/bin/cmux-autogroup ~/.local/bin/cmux-session-cleanup
+rm -r ~/.local/state/cmux-autogroup
+```
+
+Then remove the `session-cleanup` action and its tab-bar button from
+`~/.config/cmux/cmux.json`.
